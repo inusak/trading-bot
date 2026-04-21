@@ -144,7 +144,10 @@ def cmd_notify(args):
     req = urllib.request.Request(
         config.DISCORD_WEBHOOK_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "trading-bot/1.0 (+https://github.com)",
+        },
         method="POST",
     )
     try:
