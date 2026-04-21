@@ -66,6 +66,39 @@ def test_submit_order_dry_run_writes_log(mock_client, tmp_path, monkeypatch):
     assert "AAPL" in config.TRADES_LOG_FILE.read_text()
 
 
+def test_notify_skips_without_webhook(monkeypatch, capsys):
+    import bot, config
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_URL", None)
+    import argparse
+    bot.cmd_notify(argparse.Namespace(text="hello"))
+    out = capsys.readouterr().out
+    assert "skipped" in out
+
+
+def test_notify_posts_to_webhook(monkeypatch, capsys):
+    import bot, config
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/fake")
+    captured = {}
+
+    class FakeResp:
+        status = 204
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["data"] = req.data
+        return FakeResp()
+
+    monkeypatch.setattr(bot.urllib.request, "urlopen", fake_urlopen)
+    import argparse
+    bot.cmd_notify(argparse.Namespace(text="test msg"))
+    assert captured["url"] == "https://discord.com/api/webhooks/fake"
+    assert b"test msg" in captured["data"]
+    out = capsys.readouterr().out
+    assert "204" in out
+
+
 @patch("broker.alpaca._client")
 def test_submit_order_refuses_past_budget(mock_client, capsys):
     import bot

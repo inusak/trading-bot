@@ -16,6 +16,8 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 ALPACA_PAPER = "paper" in ALPACA_BASE_URL
 
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
 MAX_ORDERS_PER_DAY = 3
 MAX_POSITION_PCT = 0.15
 

@@ -7,10 +7,12 @@ Subcommands:
   append-report   Append slot block to reports/day_XX.md.
   count-orders    Print orders used today.
   slot-now        Print current slot based on ET time.
+  notify          Post status message to Discord webhook.
 """
 import argparse
 import json
 import sys
+import urllib.request
 from dataclasses import asdict
 from datetime import datetime, time
 from pathlib import Path
@@ -133,6 +135,26 @@ def cmd_slot_now(_args):
     print(_slot_from_now())
 
 
+def cmd_notify(args):
+    if not config.DISCORD_WEBHOOK_URL:
+        print(json.dumps({"skipped": "DISCORD_WEBHOOK_URL not set"}))
+        return
+    content = args.text[:1900]
+    payload = json.dumps({"content": content}).encode("utf-8")
+    req = urllib.request.Request(
+        config.DISCORD_WEBHOOK_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(json.dumps({"status": resp.status}))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(4)
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -165,6 +187,10 @@ def main():
 
     sub.add_parser("count-orders").set_defaults(func=cmd_count_orders)
     sub.add_parser("slot-now").set_defaults(func=cmd_slot_now)
+
+    s = sub.add_parser("notify")
+    s.add_argument("--text", required=True)
+    s.set_defaults(func=cmd_notify)
 
     args = p.parse_args()
     args.func(args)

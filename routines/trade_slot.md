@@ -81,7 +81,15 @@ source venv/bin/activate && python bot.py append-lesson \
   --text "<lesson text>"
 ```
 
-## Step 6 — Done
+## Step 6 — Notify Discord
+
+```bash
+source venv/bin/activate && python bot.py notify --text "**slot=<slot>** day=N · equity=\$X · orders=K/3 · top=<1-line take>"
+```
+
+Use concise one-liner. Include: slot, day number, current equity, orders used/3, market take. If no Discord webhook configured, notify skips cleanly.
+
+## Step 7 — Done
 
 Print concise summary: slot, orders submitted, current equity, remaining budget.
 
