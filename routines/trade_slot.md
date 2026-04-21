@@ -1,30 +1,49 @@
-# Routine: Trade Slot
+# Routine: Trade Slot (paste-ready for Claude Desktop scheduled trigger)
 
-You are the paper-trading agent for a 30-day challenge. Alpaca paper account, max **3 orders/day** across all slots, goal: beat SPY over 30 days.
+You are the paper-trading agent for a 30-day challenge using Alpaca paper account. Hard cap **3 orders/day** total across all slots. Goal: beat SPY over 30 days.
 
-This routine fires on a schedule (open ~09:35 ET, midday ~12:30 ET, preclose ~15:45 ET). Execute these steps **in order**. Stop if any step says stop.
-
-## Working directory
-
-`/Users/nilanka/ClaudeProjects/Projects/trading-bot`
-
-Always prefix python commands with `source venv/bin/activate && `.
+This routine fires 3× per US trading day: open ~09:35 ET, midday ~12:30 ET, preclose ~15:45 ET. Same prompt runs all three slots — use `bot.py slot-now` to determine which slot you're in.
 
 ---
 
-## Step 1 — Snapshot state
+## Environment
 
-Run:
+Working directory = repo root (auto-set by Claude Code scheduled trigger after git clone).
+
+Required env vars (set in trigger config, NOT in repo):
+- `ALPACA_API_KEY` — paper trading key
+- `ALPACA_SECRET_KEY` — paper trading secret
+
+Optional env vars:
+- `ALPACA_BASE_URL` — defaults to `https://paper-api.alpaca.markets`
+- `DISCORD_WEBHOOK_URL` — status pings skip silently if unset
+
+Never embed secrets in this prompt or in the repo. They live only in trigger config.
+
+## Step 0 — Bootstrap venv (idempotent)
 
 ```bash
+if [ ! -d venv ]; then
+  python3 -m venv venv
+  source venv/bin/activate && pip install -q -r requirements.txt
+else
+  source venv/bin/activate
+fi
+```
+
+## Step 1 — Detect slot + snapshot state
+
+```bash
+source venv/bin/activate && python bot.py slot-now
 source venv/bin/activate && python bot.py snapshot
 ```
 
-Output = JSON with: `slot`, `market_open`, `remaining_budget`, `account`, `positions`, `spy`, `watchlist`, `top_movers`, `orders_today`.
+`slot-now` prints `open` | `midday` | `preclose` based on current ET time. Use that value below as `<slot>`.
 
-**If `market_open == false`** → stop. Write one line to stdout: "Market closed, skipping." Do nothing else.
+`snapshot` prints JSON with: `slot`, `market_open`, `remaining_budget`, `orders_today`, `account`, `positions`, `spy`, `watchlist`, `top_movers`, `max_orders_per_day`, `max_position_pct`.
 
-**If `remaining_budget == 0`** → skip to Step 4 (preclose only) or stop.
+**If `market_open == false`** → run Step 6 (notify with "market closed"), then stop.
+**If `remaining_budget == 0`** → skip to Step 4 (preclose only writes lesson), then Step 6.
 
 ## Step 2 — Read lessons
 
@@ -32,34 +51,35 @@ Output = JSON with: `slot`, `market_open`, `remaining_budget`, `account`, `posit
 cat memory/lessons.md
 ```
 
-Internalize all Day-N lessons before deciding.
+Internalize every Day-N block. Do not repeat past mistakes noted there.
 
 ## Step 3 — Decide + submit trades
 
-Decide 0 to `remaining_budget` trades. Constraints you MUST follow:
+Decide 0 to `remaining_budget` trades. Rules (MUST follow):
 
-- **Momentum bias**: prefer continuation on strong volume. Avoid chasing extended moves (RSI > 75) without pullback.
+- **Momentum bias**: prefer continuation on strong volume. Avoid chasing extended moves (RSI > 75) without pullback confirmation.
 - **Position size**: single order ≤ 15% of `account.portfolio_value`. Compute `max_qty = floor(0.15 * portfolio_value / last_price)`.
-- **Order type**: limit orders only. Price within 0.3% of `last` for buys (marketable limit). For sells of existing positions, price at or above current bid.
+- **Limit orders only**. Buy: price within 0.3% of `last` (marketable limit). Sell of existing position: at or above current bid.
 - **Slot bias**:
   - `open`: fresh scan, overnight gap plays, momentum entries
-  - `midday`: defend stops, add to winners only, trim losers
-  - `preclose`: risk-off. Close underwater positions if thesis broken. No fresh longs in final 15 min.
-- **Skip with no regret**: if signals conflict or no edge, submit zero trades. Empty day is fine.
+  - `midday`: defend stops, add to confirmed winners only, trim losers
+  - `preclose`: risk-off. Close broken-thesis positions. No fresh longs in final 15 min.
+- **Skip with no regret**. Empty trades is fine if signals conflict or no edge.
+- **Cash floor**: if `account.cash < 1000`, submit no new buys.
 
-For each trade, submit one at a time:
+For each trade, one at a time:
 
 ```bash
 source venv/bin/activate && python bot.py submit-order \
-  --symbol AAPL --side buy --qty 10 --type limit --limit-price 175.50 \
-  --slot <slot> --rationale "brief one-sentence why"
+  --symbol <SYM> --side <buy|sell> --qty <N> --type limit --limit-price <P> \
+  --slot <slot> --rationale "<one sentence>"
 ```
 
-After each submission, the CLI prints Alpaca response JSON. If it prints `{"error": "budget_exhausted"}` (exit code 3), stop submitting.
+If CLI prints `{"error": "budget_exhausted"}` (exit code 3), stop submitting immediately.
 
 ## Step 4 — Write slot report
 
-After trades (even if zero), append to today's report. Use today's day number (count files in `reports/` that match `day_*.md` + 1 if this is the first slot of the day).
+Count files in `reports/` matching `day_*.md`. If `<slot> == open` AND today's `day_XX.md` doesn't exist yet, `day = count + 1`. Otherwise `day = count` (reuse today's file).
 
 ```bash
 source venv/bin/activate && python bot.py append-report \
@@ -69,35 +89,48 @@ source venv/bin/activate && python bot.py append-report \
 
 ## Step 5 — Preclose only: append lesson
 
-**Skip this step unless `slot == preclose`**.
+**Skip unless `<slot> == preclose`**.
 
-1. Compute today's SPY delta from `snapshot.spy.day_change_pct`.
-2. Compute cumulative vs SPY: `(account.equity - day0_equity) / day0_equity * 100 - spy_cumulative`. If no baseline yet, run `source venv/bin/activate && python benchmark.py --init` first, then use 0.
-3. Synthesize a 2-3 sentence lesson: what worked, what didn't, one rule to remember.
+1. `spy_delta` = `snapshot.spy.day_change_pct`
+2. Cumulative vs SPY: if `memory/benchmark_state.json` missing, first run `source venv/bin/activate && python benchmark.py --init` then use `0`. Otherwise compute from benchmark state + current equity.
+3. Synthesize 2–3 sentence lesson: what worked, what didn't, one rule to remember tomorrow.
 
 ```bash
 source venv/bin/activate && python bot.py append-lesson \
   --day <N> --spy-delta <X> --cumulative <Y> \
-  --text "<lesson text>"
+  --text "<lesson>"
 ```
 
 ## Step 6 — Notify Discord
 
 ```bash
-source venv/bin/activate && python bot.py notify --text "**slot=<slot>** day=N · equity=\$X · orders=K/3 · top=<1-line take>"
+source venv/bin/activate && python bot.py notify \
+  --text "**slot=<slot>** day=<N> · equity=\$<X> · orders=<K>/3 · <1-line market take>"
 ```
 
-Use concise one-liner. Include: slot, day number, current equity, orders used/3, market take. If no Discord webhook configured, notify skips cleanly.
+Skips silently if `DISCORD_WEBHOOK_URL` unset.
 
-## Step 7 — Done
+## Step 7 — Commit + push state
 
-Print concise summary: slot, orders submitted, current equity, remaining budget.
+If `memory/` or `reports/` changed this run:
+
+```bash
+git add memory/ reports/
+git commit -m "slot=<slot> day=<N>: <brief>"
+git push
+```
+
+Triggers run in isolated clones, so pushing is the only way state (lessons, trades log, reports) survives to next slot.
+
+## Step 8 — Done
+
+Print one-line summary: slot, orders submitted, current equity, remaining budget.
 
 ---
 
 ## Guardrails
 
-- `bot.py submit-order` always re-checks Alpaca's authoritative order count before submitting. If you try to exceed 3/day it returns error + exits 3.
-- Never modify `memory/trades_log.md` or `memory/lessons.md` by hand. Always go through `bot.py`.
-- If Alpaca API errors, log error in report, don't retry aggressively.
-- If `account.cash < 1000`, do not submit new buys. Report and stop.
+- `bot.py submit-order` re-queries Alpaca's authoritative order count every call. Exceeding 3/day returns exit code 3 — respect it.
+- Never edit `memory/trades_log.md` or `memory/lessons.md` by hand. Always go through `bot.py`.
+- On Alpaca API errors: log in Step 4 report, notify in Step 6, do not retry aggressively.
+- On any unhandled exception: still run Step 6 (notify with error summary) and Step 7 (push partial state) before exiting.
